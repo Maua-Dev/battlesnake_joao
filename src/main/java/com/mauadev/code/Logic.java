@@ -1,252 +1,318 @@
-package com.maua;
+package starter;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.*;
 
 public class Logic {
+    private static final Logger LOG = LoggerFactory.getLogger(Logic.class);
 
-    /**
-     * Função principal de decisão de movimento da Battlesnake.
-     * Retorna a direção escolhida: "up", "down", "left" ou "right".
-     */
-    public static String move(JsonNode moveRequest) {
-        int width = moveRequest.get("board").get("width").asInt();
-        int height = moveRequest.get("board").get("height").asInt();
-        int turn = moveRequest.has("turn") ? moveRequest.get("turn").asInt() : 0;
+    // Representação de coordenada 2D imutável
+    public static final class Coord {
+        public final int x;
+        public final int y;
 
-        JsonNode you = moveRequest.get("you");
-        int myHealth = you.get("health").asInt();
-        int myLength = you.get("length").asInt();
-
-        JsonNode myHead = you.get("head");
-        int headX = myHead.get("x").asInt();
-        int headY = myHead.get("y").asInt();
-
-        // 1. Mapear direções possíveis a partir da cabeça
-        Map<String, Point> possibleMoves = new HashMap<>();
-        possibleMoves.put("up", new Point(headX, headY + 1));
-        possibleMoves.put("down", new Point(headX, headY - 1));
-        possibleMoves.put("left", new Point(headX - 1, headY));
-        possibleMoves.put("right", new Point(headX + 1, headY));
-
-        // 2. Mapear obstáculos (corpos de cobras) e zonas de perigo de adversários
-        Set<Point> obstacles = new HashSet<>();
-        List<Point> dangerousHeadZones = new ArrayList<>();
-        List<Point> targetHeadZones = new ArrayList<>();
-
-        JsonNode snakes = moveRequest.get("board").get("snakes");
-        for (JsonNode snake : snakes) {
-            JsonNode body = snake.get("body");
-            int enemyLength = snake.get("length").asInt();
-            boolean isMe = snake.get("id").asText().equals(you.get("id").asText());
-
-            for (int i = 0; i < body.size(); i++) {
-                JsonNode seg = body.get(i);
-                Point p = new Point(seg.get("x").asInt(), seg.get("y").asInt());
-
-                // A ponta da cauda vai avançar no próximo turno (a menos que a cobra tenha acabado de comer)
-                boolean isTail = (i == body.size() - 1);
-                if (isTail) {
-                    JsonNode segBeforeTail = body.get(body.size() - 2);
-                    boolean hasEaten = seg.get("x").asInt() == segBeforeTail.get("x").asInt() 
-                                    && seg.get("y").asInt() == segBeforeTail.get("y").asInt();
-                    if (!hasEaten) {
-                        continue; // Cauda vai liberar este quadrado
-                    }
-                }
-                obstacles.add(p);
-            }
-
-            // Mapear vizinhança das cabeças inimigas
-            if (!isMe) {
-                JsonNode enemyHead = snake.get("head");
-                int ehX = enemyHead.get("x").asInt();
-                int ehY = enemyHead.get("y").asInt();
-                Point[] adj = {
-                    new Point(ehX, ehY + 1),
-                    new Point(ehX, ehY - 1),
-                    new Point(ehX - 1, ehY),
-                    new Point(ehX + 1, ehY)
-                };
-                for (Point p : adj) {
-                    if (enemyLength >= myLength) {
-                        dangerousHeadZones.add(p);
-                    } else {
-                        targetHeadZones.add(p);
-                    }
-                }
-            }
-        }
-
-        // 3. Avaliar e pontuar movimentos válidos
-        Map<String, Double> moveScores = new HashMap<>();
-
-        for (Map.Entry<String, Point> entry : possibleMoves.entrySet()) {
-            String dir = entry.getKey();
-            Point target = entry.getValue();
-
-            // REGRA: Não bater nas paredes do mapa
-            if (target.x < 0 || target.x >= width || target.y < 0 || target.y >= height) {
-                continue;
-            }
-
-            // REGRA SOLICITADA: Se estiver na segunda linha (y == 1), é proibido ir para cima ("up")
-            if (headY == 1 && dir.equals("up")) {
-                continue;
-            }
-
-            // REGRA: Não bater no corpo de nenhuma cobra
-            if (obstacles.contains(target)) {
-                continue;
-            }
-
-            // Pontuação inicial para um movimento seguro
-            double score = 1000.0;
-
-            // Perigo: Evitar colisão frontal com cobras maiores ou de mesmo tamanho
-            if (dangerousHeadZones.contains(target)) {
-                score -= 800.0;
-            }
-
-            // Oportunidade: Atacar cobras menores
-            if (targetHeadZones.contains(target)) {
-                score += 300.0;
-            }
-
-            // Algoritmo Flood-Fill: Verificar espaço transitável disponível
-            int space = countReachableSpace(target, width, height, obstacles);
-            if (space < myLength) {
-                score -= (myLength - space) * 150.0; // Penalidade alta por entrar em becos sem saída
-            } else {
-                score += space * 10.0; // Bônus por área aberta
-            }
-
-            // Busca por comida
-            JsonNode foodList = moveRequest.get("board").get("food");
-            Point nearestFood = findNearestFood(target, foodList);
-
-            if (nearestFood != null) {
-                int dist = Math.abs(target.x - nearestFood.x) + Math.abs(target.y - nearestFood.y);
-                if (myHealth < 60 || myLength < 10) {
-                    score += (100.0 - dist * 10.0) * 3.0; // Alta prioridade para comer
-                } else {
-                    score += (50.0 - dist * 5.0);
-                }
-            }
-
-            // Bônus de posicionamento central
-            double centerX = (width - 1) / 2.0;
-            double centerY = (height - 1) / 2.0;
-            double distToCenter = Math.abs(target.x - centerX) + Math.abs(target.y - centerY);
-            score -= distToCenter * 2.0;
-
-            moveScores.put(dir, score);
-        }
-
-        // 4. Selecionar o melhor movimento com maior pontuação
-        if (moveScores.isEmpty()) {
-            // Plano de emergência caso todas as opções sejam perigosas
-            for (Map.Entry<String, Point> entry : possibleMoves.entrySet()) {
-                Point t = entry.getValue();
-                if (t.x >= 0 && t.x < width && t.y >= 0 && t.y < height) {
-                    return entry.getKey();
-                }
-            }
-            return "up";
-        }
-
-        String bestMove = "up";
-        double maxScore = -Double.MAX_VALUE;
-
-        for (Map.Entry<String, Double> entry : moveScores.entrySet()) {
-            if (entry.getValue() > maxScore) {
-                maxScore = entry.getValue();
-                bestMove = entry.getKey();
-            }
-        }
-
-        return bestMove;
-    }
-
-    /**
-     * Algoritmo BFS para calcular o espaço livre alcançável a partir de um ponto.
-     */
-    private static int countReachableSpace(Point start, int width, int height, Set<Point> obstacles) {
-        Set<Point> visited = new HashSet<>();
-        Queue<Point> queue = new LinkedList<>();
-
-        queue.add(start);
-        visited.add(start);
-
-        int count = 0;
-        int maxDepth = 60; // Limite para garantir resposta dentro do tempo limite da API (<200ms)
-
-        while (!queue.isEmpty() && count < maxDepth) {
-            Point current = queue.poll();
-            count++;
-
-            Point[] neighbors = {
-                new Point(current.x, current.y + 1),
-                new Point(current.x, current.y - 1),
-                new Point(current.x - 1, current.y),
-                new Point(current.x + 1, current.y)
-            };
-
-            for (Point next : neighbors) {
-                if (next.x >= 0 && next.x < width && next.y >= 0 && next.y < height) {
-                    if (!obstacles.contains(next) && !visited.contains(next)) {
-                        visited.add(next);
-                        queue.add(next);
-                    }
-                }
-            }
-        }
-        return count;
-    }
-
-    /**
-     * Localiza a comida mais próxima da posição atual.
-     */
-    private static Point findNearestFood(Point start, JsonNode foodList) {
-        Point nearest = null;
-        int minDist = Integer.MAX_VALUE;
-
-        if (foodList != null && foodList.isArray()) {
-            for (JsonNode food : foodList) {
-                Point f = new Point(food.get("x").asInt(), food.get("y").asInt());
-                int dist = Math.abs(start.x - f.x) + Math.abs(start.y - f.y);
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearest = f;
-                }
-            }
-        }
-        return nearest;
-    }
-
-    /**
-     * Classe utilitária para representar coordenadas no tabuleiro.
-     */
-    private static class Point {
-        final int x;
-        final int y;
-
-        Point(int x, int y) {
+        public Coord(int x, int y) {
             this.x = x;
             this.y = y;
+        }
+
+        public Coord move(String direction) {
+            switch (direction) {
+                case "up":    return new Coord(x, y + 1);
+                case "down":  return new Coord(x, y - 1);
+                case "left":  return new Coord(x - 1, y);
+                case "right": return new Coord(x + 1, y);
+                default:      return this;
+            }
+        }
+
+        public int manhattanDistance(Coord other) {
+            return Math.abs(this.x - other.x) + Math.abs(this.y - other.y);
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
-            if (!(o instanceof Point)) return false;
-            Point point = (Point) o;
-            return x == point.x && y == point.y;
+            if (!(o instanceof Coord)) return false;
+            Coord c = (Coord) o;
+            return x == c.x && y == c.y;
         }
 
         @Override
         public int hashCode() {
             return Objects.hash(x, y);
         }
+
+        @Override
+        public String toString() {
+            return "(" + x + "," + y + ")";
+        }
+    }
+
+    public static final class Snake {
+        public final String id;
+        public final int health;
+        public final int length;
+        public final Coord head;
+        public final List<Coord> body;
+
+        public Snake(String id, int health, int length, Coord head, List<Coord> body) {
+            this.id = id;
+            this.health = health;
+            this.length = length;
+            this.head = head;
+            this.body = body;
+        }
+    }
+
+    /**
+     * Ponto de entrada chamado a cada turno pelo Battlesnake engine.
+     */
+    public static Map<String, String> move(JsonNode turnData) {
+        int turn = turnData.path("turn").asInt(0);
+        JsonNode boardNode = turnData.path("board");
+        int width = boardNode.path("width").asInt(11);
+        int height = boardNode.path("height").asInt(11);
+
+        // Parse da nossa cobra (YOU)
+        JsonNode youNode = turnData.path("you");
+        String myId = youNode.path("id").asText();
+        int myHealth = youNode.path("health").asInt(100);
+        int myLength = youNode.path("length").asInt(3);
+        Coord myHead = parseCoord(youNode.path("head"));
+        List<Coord> myBody = parseCoordList(youNode.path("body"));
+        Snake mySnake = new Snake(myId, myHealth, myLength, myHead, myBody);
+
+        // Parse de todas as cobras
+        List<Snake> opponents = new ArrayList<>();
+        int maxOpponentLength = 0;
+        for (JsonNode snakeNode : boardNode.path("snakes")) {
+            String sId = snakeNode.path("id").asText();
+            if (!sId.equals(myId)) {
+                int sHealth = snakeNode.path("health").asInt(100);
+                int sLength = snakeNode.path("length").asInt(3);
+                Coord sHead = parseCoord(snakeNode.path("head"));
+                List<Coord> sBody = parseCoordList(snakeNode.path("body"));
+                opponents.add(new Snake(sId, sHealth, sLength, sHead, sBody));
+                if (sLength > maxOpponentLength) {
+                    maxOpponentLength = sLength;
+                }
+            }
+        }
+
+        // Parse de comidas e hazards
+        List<Coord> foodList = parseCoordList(boardNode.path("food"));
+        Set<Coord> hazards = new HashSet<>(parseCoordList(boardNode.path("hazards")));
+
+        // 1. Mapeamento de obstáculos fixos (paredes e corpos)
+        boolean[][] blocked = new boolean[width][height];
+
+        // Marca corpo próprio
+        for (int i = 0; i < myBody.size() - 1; i++) {
+            Coord c = myBody.get(i);
+            if (isInBounds(c, width, height)) {
+                blocked[c.x][c.y] = true;
+            }
+        }
+
+        // Marca corpos e cabeças dos oponentes
+        for (Snake opp : opponents) {
+            for (int i = 0; i < opp.body.size() - 1; i++) {
+                Coord c = opp.body.get(i);
+                if (isInBounds(c, width, height)) {
+                    blocked[c.x][c.y] = true;
+                }
+            }
+        }
+
+        // 2. Mapeamento de zonas de perigo Head-to-Head
+        Set<Coord> lethalDangerTiles = new HashSet<>();
+        Set<Coord> killOpportunityTiles = new HashSet<>();
+        String[] directions = {"up", "down", "left", "right"};
+
+        for (Snake opp : opponents) {
+            for (String dir : directions) {
+                Coord oppNext = opp.head.move(dir);
+                if (isInBounds(oppNext, width, height)) {
+                    if (opp.length >= myLength) {
+                        lethalDangerTiles.add(oppNext);
+                    } else {
+                        killOpportunityTiles.add(oppNext);
+                    }
+                }
+            }
+        }
+
+        // 3. Avaliação de cada um dos 4 movimentos possíveis
+        Map<String, Double> moveScores = new HashMap<>();
+
+        for (String move : directions) {
+            Coord next = myHead.move(move);
+
+            // Filtro 1: Fora do tabuleiro = Morte instantânea
+            if (!isInBounds(next, width, height)) {
+                moveScores.put(move, -1_000_000.0);
+                continue;
+            }
+
+            // Filtro 2: Colisão com corpos = Morte instantânea
+            if (blocked[next.x][next.y]) {
+                moveScores.put(move, -1_000_000.0);
+                continue;
+            }
+
+            double score = 1000.0;
+
+            // REGRA ESPECÍFICA: Spawn na segunda linha (y == 1 ou y == height - 2)
+            // Se estiver nos 3 primeiros turnos e na 2ª linha, bloqueia subir para não morrer contra teto/paredes
+            if (turn <= 3) {
+                if ((myHead.y == 1 || myHead.y == height - 2) && "up".equals(move)) {
+                    score -= 500_000.0;
+                }
+                // Previne bater nas bordas no início do jogo
+                if (next.y == 0 || next.y == height - 1 || next.x == 0 || next.x == width - 1) {
+                    score -= 100.0;
+                }
+            }
+
+            // Filtro 3: Risco letal de colisão frontal de cabeças
+            if (lethalDangerTiles.contains(next)) {
+                score -= 80_000.0;
+            } else if (killOpportunityTiles.contains(next)) {
+                // Se formos maiores, podemos pressionar a casa para eliminar o menor
+                score += 300.0;
+            }
+
+            // Filtro 4: Penalidade por Hazards
+            if (hazards.contains(next)) {
+                score -= (myHealth < 30 ? 2500.0 : 400.0);
+            }
+
+            // Heurística A: Flood Fill (Espaço livre disponível a partir deste movimento)
+            int reachableSpace = calculateFloodFill(next, width, height, blocked, lethalDangerTiles);
+            if (reachableSpace < myLength) {
+                // Beco sem saída: risco altíssimo de ficar preso e se auto-esmagar
+                score -= (myLength - reachableSpace) * 4_000.0;
+            } else {
+                score += reachableSpace * 25.0;
+            }
+
+            // Heurística B: Comportamento com Comida
+            if (!foodList.isEmpty()) {
+                Coord closestFood = findClosestCoord(next, foodList);
+                int distFood = next.manhattanDistance(closestFood);
+
+                boolean isStarving = myHealth < 35;
+                boolean needGrowth = myLength <= maxOpponentLength;
+
+                if (isStarving) {
+                    score += (100 - distFood) * 250.0;
+                } else if (needGrowth) {
+                    score += (100 - distFood) * 80.0;
+                } else {
+                    // Cobra grande e com vida: consome comida só se estiver no caminho seguro
+                    score += (100 - distFood) * 15.0;
+                }
+            }
+
+            // Heurística C: Seguir a própria cauda (Tail Chasing em situações fechadas)
+            Coord myTail = myBody.get(myBody.size() - 1);
+            int distToTail = next.manhattanDistance(myTail);
+            score += (100 - distToTail) * 10.0;
+
+            // Heurística D: Manter proximidade do centro (Evita ficar encurralado nos cantos)
+            double centerX = (width - 1) / 2.0;
+            double centerY = (height - 1) / 2.0;
+            double distToCenter = Math.abs(next.x - centerX) + Math.abs(next.y - centerY);
+            score -= distToCenter * 8.0;
+
+            // Borda do tabuleiro: leve penalidade por andar colado nas paredes
+            if (next.x == 0 || next.x == width - 1 || next.y == 0 || next.y == height - 1) {
+                score -= 40.0;
+            }
+
+            moveScores.put(move, score);
+        }
+
+        // Escolhe o movimento de maior pontuação
+        String bestMove = "down";
+        double highestScore = -Double.MAX_VALUE;
+
+        for (Map.Entry<String, Double> entry : moveScores.entrySet()) {
+            if (entry.getValue() > highestScore) {
+                highestScore = entry.getValue();
+                bestMove = entry.getKey();
+            }
+        }
+
+        LOG.info("Turn {}: Moving {} (Score: {})", turn, bestMove, highestScore);
+
+        Map<String, String> response = new HashMap<>();
+        response.put("move", bestMove);
+        return response;
+    }
+
+    /**
+     * Algoritmo Flood Fill (BFS) para contar quantas casas livres estão conectadas.
+     * Considera casas com risco de cabeça inimiga como semi-bloqueadas para evitar armadilhas.
+     */
+    private static int calculateFloodFill(Coord start, int width, int height, boolean[][] blocked, Set<Coord> dangerTiles) {
+        boolean[][] visited = new boolean[width][height];
+        Queue<Coord> queue = new ArrayDeque<>();
+
+        visited[start.x][start.y] = true;
+        queue.add(start);
+        int count = 0;
+
+        while (!queue.isEmpty()) {
+            Coord curr = queue.poll();
+            count++;
+
+            for (String dir : new String[]{"up", "down", "left", "right"}) {
+                Coord neighbor = curr.move(dir);
+                if (isInBounds(neighbor, width, height)
+                        && !visited[neighbor.x][neighbor.y]
+                        && !blocked[neighbor.x][neighbor.y]
+                        && !dangerTiles.contains(neighbor)) {
+                    visited[neighbor.x][neighbor.y] = true;
+                    queue.add(neighbor);
+                }
+            }
+        }
+        return count;
+    }
+
+    private static boolean isInBounds(Coord c, int width, int height) {
+        return c.x >= 0 && c.x < width && c.y >= 0 && c.y < height;
+    }
+
+    private static Coord findClosestCoord(Coord origin, List<Coord> targets) {
+        Coord closest = targets.get(0);
+        int minDist = Integer.MAX_VALUE;
+        for (Coord target : targets) {
+            int d = origin.manhattanDistance(target);
+            if (d < minDist) {
+                minDist = d;
+                closest = target;
+            }
+        }
+        return closest;
+    }
+
+    private static Coord parseCoord(JsonNode node) {
+        return new Coord(node.path("x").asInt(), node.path("y").asInt());
+    }
+
+    private static List<Coord> parseCoordList(JsonNode arrayNode) {
+        List<Coord> list = new ArrayList<>();
+        if (arrayNode != null && arrayNode.isArray()) {
+            for (JsonNode item : arrayNode) {
+                list.add(parseCoord(item));
+            }
+        }
+        return list;
     }
 }
