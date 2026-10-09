@@ -1,4 +1,3 @@
-```java
 package com.mauadev.code;
 
 import com.mauadev.code.entities.Coordinate;
@@ -708,4 +707,3 @@ public class Logic {
         }
     }
 }
-```
