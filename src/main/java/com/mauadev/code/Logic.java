@@ -1,318 +1,711 @@
-package starter;
+```java
+package com.mauadev.code;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.mauadev.code.entities.Coordinate;
+import com.mauadev.code.entities.GameState;
+import com.mauadev.code.entities.Board;
+import com.mauadev.code.entities.Snake;
 
 import java.util.*;
 
 public class Logic {
-    private static final Logger LOG = LoggerFactory.getLogger(Logic.class);
 
-    // Representação de coordenada 2D imutável
-    public static final class Coord {
-        public final int x;
-        public final int y;
+    private static final String[] DIRECTIONS = {
+        "up", "down", "left", "right"
+    };
 
-        public Coord(int x, int y) {
+    private static final int UP = 0;
+    private static final int DOWN = 1;
+    private static final int LEFT = 2;
+    private static final int RIGHT = 3;
+
+    private static final double DEAD = -1_000_000_000.0;
+
+    public static Map<String, String> info() {
+        Map<String, String> info = new HashMap<>();
+        info.put("apiversion", "1");
+        info.put("author", "");
+        info.put("color", "#000000ff");
+        info.put("head", "evil");
+        info.put("tail", "bolt");
+        return info;
+    }
+
+    public static void start(GameState state) {
+    }
+
+    public static void end(GameState state) {
+    }
+
+    public static String getMove(GameState state) {
+        try {
+            if (state == null
+                    || state.getBoard() == null
+                    || state.getYou() == null
+                    || state.getYou().getHead() == null) {
+                return "up";
+            }
+
+            Engine engine = new Engine(state);
+            return engine.chooseMove();
+
+        } catch (Exception e) {
+            // A resposta nunca deve deixar de ser uma direção válida.
+            return "up";
+        }
+    }
+
+    private static final class Pos {
+        final int x;
+        final int y;
+
+        Pos(int x, int y) {
             this.x = x;
             this.y = y;
         }
 
-        public Coord move(String direction) {
+        Pos move(int direction) {
             switch (direction) {
-                case "up":    return new Coord(x, y + 1);
-                case "down":  return new Coord(x, y - 1);
-                case "left":  return new Coord(x - 1, y);
-                case "right": return new Coord(x + 1, y);
-                default:      return this;
+                case UP:
+                    return new Pos(x, y + 1);
+                case DOWN:
+                    return new Pos(x, y - 1);
+                case LEFT:
+                    return new Pos(x - 1, y);
+                case RIGHT:
+                    return new Pos(x + 1, y);
+                default:
+                    return this;
             }
         }
 
-        public int manhattanDistance(Coord other) {
-            return Math.abs(this.x - other.x) + Math.abs(this.y - other.y);
+        int distance(Pos other) {
+            return Math.abs(x - other.x)
+                    + Math.abs(y - other.y);
         }
 
         @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (!(o instanceof Coord)) return false;
-            Coord c = (Coord) o;
-            return x == c.x && y == c.y;
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof Pos)) return false;
+
+            Pos other = (Pos) obj;
+            return x == other.x && y == other.y;
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(x, y);
-        }
-
-        @Override
-        public String toString() {
-            return "(" + x + "," + y + ")";
+            return 31 * x + y;
         }
     }
 
-    public static final class Snake {
-        public final String id;
-        public final int health;
-        public final int length;
-        public final Coord head;
-        public final List<Coord> body;
+    private static final class SnakeData {
+        final String id;
+        final int health;
+        final List<Pos> body;
 
-        public Snake(String id, int health, int length, Coord head, List<Coord> body) {
+        SnakeData(String id, int health, List<Pos> body) {
             this.id = id;
             this.health = health;
-            this.length = length;
-            this.head = head;
             this.body = body;
+        }
+
+        Pos head() {
+            return body.isEmpty() ? null : body.get(0);
+        }
+
+        Pos tail() {
+            return body.isEmpty()
+                    ? null
+                    : body.get(body.size() - 1);
+        }
+
+        int length() {
+            return body.size();
         }
     }
 
-    /**
-     * Ponto de entrada chamado a cada turno pelo Battlesnake engine.
-     */
-    public static Map<String, String> move(JsonNode turnData) {
-        int turn = turnData.path("turn").asInt(0);
-        JsonNode boardNode = turnData.path("board");
-        int width = boardNode.path("width").asInt(11);
-        int height = boardNode.path("height").asInt(11);
+    private static final class Engine {
 
-        // Parse da nossa cobra (YOU)
-        JsonNode youNode = turnData.path("you");
-        String myId = youNode.path("id").asText();
-        int myHealth = youNode.path("health").asInt(100);
-        int myLength = youNode.path("length").asInt(3);
-        Coord myHead = parseCoord(youNode.path("head"));
-        List<Coord> myBody = parseCoordList(youNode.path("body"));
-        Snake mySnake = new Snake(myId, myHealth, myLength, myHead, myBody);
+        final int width;
+        final int height;
+        final int turn;
+        final int cells;
 
-        // Parse de todas as cobras
-        List<Snake> opponents = new ArrayList<>();
-        int maxOpponentLength = 0;
-        for (JsonNode snakeNode : boardNode.path("snakes")) {
-            String sId = snakeNode.path("id").asText();
-            if (!sId.equals(myId)) {
-                int sHealth = snakeNode.path("health").asInt(100);
-                int sLength = snakeNode.path("length").asInt(3);
-                Coord sHead = parseCoord(snakeNode.path("head"));
-                List<Coord> sBody = parseCoordList(snakeNode.path("body"));
-                opponents.add(new Snake(sId, sHealth, sLength, sHead, sBody));
-                if (sLength > maxOpponentLength) {
-                    maxOpponentLength = sLength;
+        final SnakeData me;
+        final List<SnakeData> enemies = new ArrayList<>();
+        final List<Pos> food = new ArrayList<>();
+        final Set<Pos> hazards = new HashSet<>();
+
+        final long deadline;
+
+        Engine(GameState state) {
+            Board board = state.getBoard();
+            Snake you = state.getYou();
+
+            width = board.getWidth();
+            height = board.getHeight();
+            turn = state.getTurn();
+
+            if (width <= 0 || height <= 0
+                    || (long) width * height > 2500) {
+                throw new IllegalArgumentException("Tabuleiro inválido");
+            }
+
+            cells = width * height;
+
+            me = parseSnake(you);
+
+            for (Snake snake : safeList(board.getSnakes())) {
+                if (snake == null
+                        || Objects.equals(snake.getId(), you.getId())) {
+                    continue;
+                }
+
+                SnakeData enemy = parseSnake(snake);
+
+                // Ignora entradas inválidas sem cabeça.
+                if (enemy.head() != null) {
+                    enemies.add(enemy);
+                }
+            }
+
+            for (Coordinate c : safeList(board.getFood())) {
+                Pos p = parsePos(c);
+                if (inside(p)) {
+                    food.add(p);
+                }
+            }
+
+            for (Coordinate c : safeList(board.getHazards())) {
+                Pos p = parsePos(c);
+                if (inside(p)) {
+                    hazards.add(p);
+                }
+            }
+
+            int timeout = state.getGame() == null
+                    ? 500
+                    : state.getGame().getTimeout();
+
+            if (timeout <= 0) {
+                timeout = 500;
+            }
+
+            // Reserva margem para a Lambda e para a rede.
+            long budgetMs = Math.max(5,
+                    Math.min(65, timeout - 180));
+
+            deadline = System.nanoTime()
+                    + budgetMs * 1_000_000L;
+        }
+
+        private <T> List<T> safeList(List<T> list) {
+            return list == null
+                    ? Collections.emptyList()
+                    : list;
+        }
+
+        private SnakeData parseSnake(Snake snake) {
+            List<Pos> body = new ArrayList<>();
+
+            for (Coordinate c : safeList(snake.getBody())) {
+                Pos p = parsePos(c);
+                if (p != null) {
+                    body.add(p);
+                }
+            }
+
+            if (body.isEmpty() && snake.getHead() != null) {
+                body.add(parsePos(snake.getHead()));
+            }
+
+            return new SnakeData(
+                    snake.getId(),
+                    snake.getHealth(),
+                    body
+            );
+        }
+
+        private Pos parsePos(Coordinate c) {
+            if (c == null) return null;
+            return new Pos(c.getX(), c.getY());
+        }
+
+        boolean inside(Pos p) {
+            return p != null
+                    && p.x >= 0 && p.x < width
+                    && p.y >= 0 && p.y < height;
+        }
+
+        boolean isFood(Pos p) {
+            return food.contains(p);
+        }
+
+        boolean isHazard(Pos p) {
+            return hazards.contains(p);
+        }
+
+        boolean nearWall(Pos p) {
+            return p.x == 0 || p.x == width - 1
+                    || p.y == 0 || p.y == height - 1;
+        }
+
+        /*
+         * As caudas podem liberar a casa na próxima jogada.
+         * Mantemos bloqueados todos os outros segmentos.
+         */
+        Set<Pos> occupied(boolean growing) {
+            Set<Pos> blocked = new HashSet<>();
+
+            addBody(blocked, me, growing);
+
+            for (SnakeData enemy : enemies) {
+                addBody(blocked, enemy, false);
+            }
+
+            return blocked;
+        }
+
+        private void addBody(
+                Set<Pos> blocked,
+                SnakeData snake,
+                boolean growing
+        ) {
+            int limit = snake.body.size();
+
+            // A cauda só sai se não houver crescimento.
+            if (!growing && limit > 0) {
+                limit--;
+            }
+
+            for (int i = 0; i < limit; i++) {
+                Pos p = snake.body.get(i);
+                if (inside(p)) {
+                    blocked.add(p);
                 }
             }
         }
 
-        // Parse de comidas e hazards
-        List<Coord> foodList = parseCoordList(boardNode.path("food"));
-        Set<Coord> hazards = new HashSet<>(parseCoordList(boardNode.path("hazards")));
-
-        // 1. Mapeamento de obstáculos fixos (paredes e corpos)
-        boolean[][] blocked = new boolean[width][height];
-
-        // Marca corpo próprio
-        for (int i = 0; i < myBody.size() - 1; i++) {
-            Coord c = myBody.get(i);
-            if (isInBounds(c, width, height)) {
-                blocked[c.x][c.y] = true;
-            }
+        /*
+         * Verifica a regra de não voltar pelo pescoço.
+         */
+        boolean reversesIntoNeck(Pos next) {
+            return me.body.size() >= 2
+                    && next.equals(me.body.get(1));
         }
 
-        // Marca corpos e cabeças dos oponentes
-        for (Snake opp : opponents) {
-            for (int i = 0; i < opp.body.size() - 1; i++) {
-                Coord c = opp.body.get(i);
-                if (isInBounds(c, width, height)) {
-                    blocked[c.x][c.y] = true;
+        /*
+         * Regra especial da arena:
+         * nos primeiros turnos, se a cabeça estiver na segunda
+         * linha de qualquer extremidade, não subir.
+         */
+        boolean forbiddenSpawnMove(int direction) {
+            if (direction != UP || turn > 3) {
+                return false;
+            }
+
+            Pos head = me.head();
+
+            return head.y == 1 || head.y == height - 2;
+        }
+
+        /*
+         * Casas em que uma cobra adversária pode chegar à nossa
+         * cabeça no próximo turno. Empates de tamanho também são
+         * perigosos.
+         */
+        boolean dangerousHeadCollision(Pos next, boolean growing) {
+            int myLength = me.length() + (growing ? 1 : 0);
+
+            for (SnakeData enemy : enemies) {
+                Pos head = enemy.head();
+
+                if (head == null || enemy.length() < myLength) {
+                    continue;
                 }
-            }
-        }
 
-        // 2. Mapeamento de zonas de perigo Head-to-Head
-        Set<Coord> lethalDangerTiles = new HashSet<>();
-        Set<Coord> killOpportunityTiles = new HashSet<>();
-        String[] directions = {"up", "down", "left", "right"};
+                for (int d = 0; d < 4; d++) {
+                    Pos enemyNext = head.move(d);
 
-        for (Snake opp : opponents) {
-            for (String dir : directions) {
-                Coord oppNext = opp.head.move(dir);
-                if (isInBounds(oppNext, width, height)) {
-                    if (opp.length >= myLength) {
-                        lethalDangerTiles.add(oppNext);
-                    } else {
-                        killOpportunityTiles.add(oppNext);
+                    if (!inside(enemyNext)) {
+                        continue;
+                    }
+
+                    if (enemyNext.equals(next)) {
+                        return true;
                     }
                 }
             }
+
+            return false;
         }
 
-        // 3. Avaliação de cada um dos 4 movimentos possíveis
-        Map<String, Double> moveScores = new HashMap<>();
+        /*
+         * Uma casa é candidata se não sai do tabuleiro, não
+         * volta pelo pescoço e não colide com um corpo bloqueado.
+         */
+        List<Integer> legalMoves() {
+            List<Integer> result = new ArrayList<>();
+            Pos head = me.head();
 
-        for (String move : directions) {
-            Coord next = myHead.move(move);
+            if (head == null) return result;
 
-            // Filtro 1: Fora do tabuleiro = Morte instantânea
-            if (!isInBounds(next, width, height)) {
-                moveScores.put(move, -1_000_000.0);
-                continue;
+            for (int d = 0; d < 4; d++) {
+                Pos next = head.move(d);
+
+                if (!inside(next)) continue;
+                if (reversesIntoNeck(next)) continue;
+                if (forbiddenSpawnMove(d)) continue;
+
+                boolean growing = isFood(next);
+                Set<Pos> blocked = occupied(growing);
+
+                if (blocked.contains(next)) continue;
+
+                // Não podemos sobreviver sem comida quando a
+                // saúde chega a zero no próximo movimento.
+                if (me.health <= 1 && !growing) continue;
+
+                result.add(d);
             }
 
-            // Filtro 2: Colisão com corpos = Morte instantânea
-            if (blocked[next.x][next.y]) {
-                moveScores.put(move, -1_000_000.0);
-                continue;
-            }
+            return result;
+        }
 
-            double score = 1000.0;
+        /*
+         * BFS: calcula distâncias reais, sem atravessar paredes,
+         * corpos, hazards ou casas proibidas.
+         */
+        int[] distances(Pos start, Set<Pos> blocked) {
+            int[] dist = new int[cells];
+            Arrays.fill(dist, Integer.MAX_VALUE);
 
-            // REGRA ESPECÍFICA: Spawn na segunda linha (y == 1 ou y == height - 2)
-            // Se estiver nos 3 primeiros turnos e na 2ª linha, bloqueia subir para não morrer contra teto/paredes
-            if (turn <= 3) {
-                if ((myHead.y == 1 || myHead.y == height - 2) && "up".equals(move)) {
-                    score -= 500_000.0;
+            if (!inside(start)) return dist;
+
+            int[] queue = new int[cells];
+            int read = 0;
+            int write = 0;
+
+            int origin = index(start);
+            queue[write++] = origin;
+            dist[origin] = 0;
+
+            while (read < write) {
+                checkTime();
+
+                int current = queue[read++];
+                Pos p = fromIndex(current);
+
+                for (int d = 0; d < 4; d++) {
+                    Pos next = p.move(d);
+
+                    if (!inside(next)) continue;
+                    if (blocked.contains(next)) continue;
+                    if (isHazard(next)) continue;
+
+                    int idx = index(next);
+
+                    if (dist[idx] != Integer.MAX_VALUE) {
+                        continue;
+                    }
+
+                    dist[idx] = dist[current] + 1;
+                    queue[write++] = idx;
                 }
-                // Previne bater nas bordas no início do jogo
-                if (next.y == 0 || next.y == height - 1 || next.x == 0 || next.x == width - 1) {
-                    score -= 100.0;
+            }
+
+            return dist;
+        }
+
+        int index(Pos p) {
+            return p.y * width + p.x;
+        }
+
+        Pos fromIndex(int i) {
+            return new Pos(i % width, i / width);
+        }
+
+        int reachableSpace(Pos start, Set<Pos> blocked) {
+            return countReachable(distances(start, blocked));
+        }
+
+        int countReachable(int[] distances) {
+            int count = 0;
+
+            for (int d : distances) {
+                if (d != Integer.MAX_VALUE) {
+                    count++;
                 }
             }
 
-            // Filtro 3: Risco letal de colisão frontal de cabeças
-            if (lethalDangerTiles.contains(next)) {
-                score -= 80_000.0;
-            } else if (killOpportunityTiles.contains(next)) {
-                // Se formos maiores, podemos pressionar a casa para eliminar o menor
-                score += 300.0;
+            return count;
+        }
+
+        /*
+         * Busca a comida mais acessível por caminho livre,
+         * em vez de usar apenas distância em linha reta.
+         */
+        int nearestFoodDistance(int[] distances) {
+            int best = Integer.MAX_VALUE;
+
+            for (Pos p : food) {
+                if (!inside(p)) continue;
+
+                int d = distances[index(p)];
+                best = Math.min(best, d);
             }
 
-            // Filtro 4: Penalidade por Hazards
-            if (hazards.contains(next)) {
-                score -= (myHealth < 30 ? 2500.0 : 400.0);
+            return best;
+        }
+
+        /*
+         * Estima a distância que o adversário percorre até a
+         * comida. Penaliza disputas que provavelmente perderemos.
+         */
+        int nearestEnemyDistance(Pos target) {
+            int best = Integer.MAX_VALUE;
+
+            for (SnakeData enemy : enemies) {
+                Pos head = enemy.head();
+                if (head == null) continue;
+
+                int distance = head.distance(target);
+                best = Math.min(best, distance);
             }
 
-            // Heurística A: Flood Fill (Espaço livre disponível a partir deste movimento)
-            int reachableSpace = calculateFloodFill(next, width, height, blocked, lethalDangerTiles);
-            if (reachableSpace < myLength) {
-                // Beco sem saída: risco altíssimo de ficar preso e se auto-esmagar
-                score -= (myLength - reachableSpace) * 4_000.0;
+            return best;
+        }
+
+        double scoreMove(int direction) {
+            Pos next = me.head().move(direction);
+            boolean growing = isFood(next);
+
+            Set<Pos> blocked = occupied(growing);
+
+            if (!inside(next) || blocked.contains(next)) {
+                return DEAD;
+            }
+
+            double score = 0;
+
+            int nextHealth = growing ? 100 : me.health - 1;
+            int nextLength = me.length() + (growing ? 1 : 0);
+
+            // 1. Sobrevivência e espaço.
+            int space = reachableSpace(next, blocked);
+
+            if (space < nextLength) {
+                score -= 500_000
+                        + (nextLength - space) * 20_000.0;
             } else {
-                score += reachableSpace * 25.0;
+                score += Math.min(space, nextLength * 3 + 15) * 100.0;
             }
 
-            // Heurística B: Comportamento com Comida
-            if (!foodList.isEmpty()) {
-                Coord closestFood = findClosestCoord(next, foodList);
-                int distFood = next.manhattanDistance(closestFood);
+            // 2. Previsão de colisões de cabeça.
+            if (dangerousHeadCollision(next, growing)) {
+                score -= 100_000;
+            }
 
-                boolean isStarving = myHealth < 35;
-                boolean needGrowth = myLength <= maxOpponentLength;
+            // 3. Evita regiões apertadas e becos sem saída.
+            int exits = 0;
 
-                if (isStarving) {
-                    score += (100 - distFood) * 250.0;
-                } else if (needGrowth) {
-                    score += (100 - distFood) * 80.0;
-                } else {
-                    // Cobra grande e com vida: consome comida só se estiver no caminho seguro
-                    score += (100 - distFood) * 15.0;
+            for (int d = 0; d < 4; d++) {
+                Pos neighbor = next.move(d);
+
+                if (inside(neighbor)
+                        && !blocked.contains(neighbor)
+                        && !neighbor.equals(me.head())) {
+                    exits++;
                 }
             }
 
-            // Heurística C: Seguir a própria cauda (Tail Chasing em situações fechadas)
-            Coord myTail = myBody.get(myBody.size() - 1);
-            int distToTail = next.manhattanDistance(myTail);
-            score += (100 - distToTail) * 10.0;
+            score += exits * 80.0;
 
-            // Heurística D: Manter proximidade do centro (Evita ficar encurralado nos cantos)
+            // 4. Busca comida usando caminho real.
+            if (!food.isEmpty()) {
+                int[] dist = distances(next, blocked);
+                int foodDistance = nearestFoodDistance(dist);
+
+                if (foodDistance == Integer.MAX_VALUE) {
+                    score -= 2_000;
+                } else {
+                    double hungerWeight;
+
+                    if (nextHealth <= 20) {
+                        hungerWeight = 2_000;
+                    } else if (nextHealth <= 40) {
+                        hungerWeight = 800;
+                    } else if (nextHealth <= 65) {
+                        hungerWeight = 250;
+                    } else {
+                        hungerWeight = 70;
+                    }
+
+                    score -= foodDistance * hungerWeight;
+
+                    if (growing) {
+                        score += nextHealth < 65
+                                ? 15_000
+                                : 3_000;
+
+                        int enemyDistance = nearestEnemyDistance(next);
+
+                        if (enemyDistance <= 1
+                                && enemies.stream().anyMatch(
+                                    e -> e.length() >= nextLength)) {
+                            score -= 20_000;
+                        }
+                    }
+                }
+            } else if (nextHealth < 35) {
+                score -= 15_000;
+            }
+
+            // 5. Penaliza hazards, especialmente com pouca vida.
+            if (isHazard(next)) {
+                score -= nextHealth < 30 ? 20_000 : 2_500;
+            }
+
+            // 6. Evita ficar colado às paredes.
+            if (nearWall(next)) {
+                score -= 250;
+            }
+
+            // 7. Favorece o centro sem sacrificar segurança.
             double centerX = (width - 1) / 2.0;
             double centerY = (height - 1) / 2.0;
-            double distToCenter = Math.abs(next.x - centerX) + Math.abs(next.y - centerY);
-            score -= distToCenter * 8.0;
 
-            // Borda do tabuleiro: leve penalidade por andar colado nas paredes
-            if (next.x == 0 || next.x == width - 1 || next.y == 0 || next.y == height - 1) {
-                score -= 40.0;
-            }
+            double centerDistance =
+                    Math.abs(next.x - centerX)
+                    + Math.abs(next.y - centerY);
 
-            moveScores.put(move, score);
-        }
+            score -= centerDistance * 3.0;
 
-        // Escolhe o movimento de maior pontuação
-        String bestMove = "down";
-        double highestScore = -Double.MAX_VALUE;
+            // 8. Se estivermos grandes e com vida, evitamos
+            // movimentos que nos prendam junto de uma cobra maior.
+            for (SnakeData enemy : enemies) {
+                Pos enemyHead = enemy.head();
 
-        for (Map.Entry<String, Double> entry : moveScores.entrySet()) {
-            if (entry.getValue() > highestScore) {
-                highestScore = entry.getValue();
-                bestMove = entry.getKey();
-            }
-        }
+                if (enemyHead == null) continue;
 
-        LOG.info("Turn {}: Moving {} (Score: {})", turn, bestMove, highestScore);
+                int distance = next.distance(enemyHead);
 
-        Map<String, String> response = new HashMap<>();
-        response.put("move", bestMove);
-        return response;
-    }
-
-    /**
-     * Algoritmo Flood Fill (BFS) para contar quantas casas livres estão conectadas.
-     * Considera casas com risco de cabeça inimiga como semi-bloqueadas para evitar armadilhas.
-     */
-    private static int calculateFloodFill(Coord start, int width, int height, boolean[][] blocked, Set<Coord> dangerTiles) {
-        boolean[][] visited = new boolean[width][height];
-        Queue<Coord> queue = new ArrayDeque<>();
-
-        visited[start.x][start.y] = true;
-        queue.add(start);
-        int count = 0;
-
-        while (!queue.isEmpty()) {
-            Coord curr = queue.poll();
-            count++;
-
-            for (String dir : new String[]{"up", "down", "left", "right"}) {
-                Coord neighbor = curr.move(dir);
-                if (isInBounds(neighbor, width, height)
-                        && !visited[neighbor.x][neighbor.y]
-                        && !blocked[neighbor.x][neighbor.y]
-                        && !dangerTiles.contains(neighbor)) {
-                    visited[neighbor.x][neighbor.y] = true;
-                    queue.add(neighbor);
+                if (enemy.length() >= nextLength && distance <= 2) {
+                    score -= (3 - distance) * 800.0;
                 }
             }
+
+            // 9. Penaliza escolhas que nos deixam sem saída
+            // mesmo que a área pareça grande à primeira vista.
+            if (exits <= 1 && space < nextLength * 2) {
+                score -= 10_000;
+            }
+
+            // 10. Com saúde alta e vantagem de tamanho,
+            // prefere espaço em vez de perseguição suicida.
+            int maxEnemyLength = 0;
+
+            for (SnakeData enemy : enemies) {
+                maxEnemyLength = Math.max(
+                        maxEnemyLength,
+                        enemy.length()
+                );
+            }
+
+            if (nextLength > maxEnemyLength && nextHealth > 50) {
+                score += Math.min(space, 100) * 20.0;
+            }
+
+            return score;
         }
-        return count;
-    }
 
-    private static boolean isInBounds(Coord c, int width, int height) {
-        return c.x >= 0 && c.x < width && c.y >= 0 && c.y < height;
-    }
-
-    private static Coord findClosestCoord(Coord origin, List<Coord> targets) {
-        Coord closest = targets.get(0);
-        int minDist = Integer.MAX_VALUE;
-        for (Coord target : targets) {
-            int d = origin.manhattanDistance(target);
-            if (d < minDist) {
-                minDist = d;
-                closest = target;
+        void checkTime() {
+            if (System.nanoTime() >= deadline) {
+                throw new RuntimeException("Tempo de busca excedido");
             }
         }
-        return closest;
-    }
 
-    private static Coord parseCoord(JsonNode node) {
-        return new Coord(node.path("x").asInt(), node.path("y").asInt());
-    }
+        String chooseMove() {
+            List<Integer> legal = legalMoves();
 
-    private static List<Coord> parseCoordList(JsonNode arrayNode) {
-        List<Coord> list = new ArrayList<>();
-        if (arrayNode != null && arrayNode.isArray()) {
-            for (JsonNode item : arrayNode) {
-                list.add(parseCoord(item));
+            if (legal.isEmpty()) {
+                return emergencyMove();
             }
+
+            int bestDirection = legal.get(0);
+            double bestScore = -Double.MAX_VALUE;
+
+            for (int direction : legal) {
+                double score;
+
+                try {
+                    score = scoreMove(direction);
+                } catch (RuntimeException e) {
+                    // Se a busca passar do orçamento, conserva
+                    // a melhor decisão já calculada.
+                    break;
+                }
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestDirection = direction;
+                }
+            }
+
+            return DIRECTIONS[bestDirection];
         }
-        return list;
+
+        /*
+         * Último recurso: escolhe a direção com menor risco
+         * geométrico quando todas as opções parecem perigosas.
+         */
+        String emergencyMove() {
+            Pos head = me.head();
+
+            if (head == null) return "up";
+
+            int bestDirection = UP;
+            double bestScore = -Double.MAX_VALUE;
+
+            for (int d = 0; d < 4; d++) {
+                Pos next = head.move(d);
+                double score = 0;
+
+                if (!inside(next)) {
+                    score -= 1_000_000;
+                } else {
+                    score += 100;
+
+                    if (reversesIntoNeck(next)) {
+                        score -= 100_000;
+                    }
+
+                    if (occupied(isFood(next)).contains(next)) {
+                        score -= 50_000;
+                    }
+
+                    if (forbiddenSpawnMove(d)) {
+                        score -= 100_000;
+                    }
+
+                    if (dangerousHeadCollision(next, isFood(next))) {
+                        score -= 25_000;
+                    }
+
+                    if (isFood(next)) {
+                        score += 5_000;
+                    }
+                }
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestDirection = d;
+                }
+            }
+
+            return DIRECTIONS[bestDirection];
+        }
     }
 }
+```
