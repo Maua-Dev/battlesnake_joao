@@ -23,10 +23,10 @@ public class Logic {
     public static Map<String, String> info() {
         Map<String, String> info = new HashMap<>();
         info.put("apiversion", "1");
-        info.put("author", "");
-        info.put("color", "#000000ff");
-        info.put("head", "evil");
-        info.put("tail", "bolt");
+        info.put("author", "Leo");
+        info.put("color", "#FF4D00");
+        info.put("head", "tiger-king");
+        info.put("tail", "hook");
         return info;
     }
 
